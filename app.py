@@ -772,9 +772,6 @@ st.markdown("""
   .format-section { margin-bottom: 12px; }
   .format-section-title { font-family: 'Space Mono', monospace; font-size: 0.58rem; color: #555570; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 4px; }
 
-  .dep-ok   { color: #7fff6a; font-family: 'Space Mono', monospace; font-size: 0.7rem; }
-  .dep-warn { color: #ffcc44; font-family: 'Space Mono', monospace; font-size: 0.7rem; }
-  .dep-err  { color: #ff6aad; font-family: 'Space Mono', monospace; font-size: 0.7rem; }
 
   div[data-baseweb="select"] > div { background: #111118 !important; border-color: #1e1e2e !important; }
   .stSlider > div > div { background: #1e1e2e !important; }
@@ -799,48 +796,6 @@ st.markdown("""
 st.markdown('<div class="main-title">Bulk<span>Convert</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="subtitle">Images · Audio · Documents — batch conversion</div>', unsafe_allow_html=True)
 
-# ── Dependency status panel ───────────────────────────────────────────────────
-with st.expander("🔧 System Dependency Status"):
-    lo_ok,  lo_msg  = _check_libreoffice()
-    pan_ok, pan_msg = _check_pandoc()
-    mam_ok          = _check_mammoth()
-    mky_ok          = _check_markdownify()
-    rl_ok           = _check_reportlab()
-    aw_ok, _        = _check_antiword()
-
-    def _dep_row(ok: bool, name: str, msg_ok: str, msg_fail: str):
-        icon  = "✅" if ok else "❌"
-        css   = "dep-ok" if ok else "dep-err"
-        label = msg_ok if ok else msg_fail
-        st.markdown(f'<div class="{css}">{icon} {name} — {label}</div>',
-                    unsafe_allow_html=True)
-
-    st.markdown("**System tools**")
-    _dep_row(lo_ok,  "LibreOffice",
-             f"found · {lo_msg}",
-             "not found · best quality for .doc — install: brew/apt libreoffice or add to packages.txt")
-    _dep_row(pan_ok, "Pandoc",
-             f"found · {pan_msg}",
-             "not found · needed for .rtf .odt .html .md outputs — install: brew/apt pandoc")
-    _dep_row(aw_ok,  "antiword",
-             "found · .doc→txt last-resort fallback",
-             "not found · optional: brew/apt antiword")
-
-    st.markdown("**Python packages** (pip install …)")
-    _dep_row(mam_ok, "mammoth",
-             "installed · .doc fallback for txt/html/md/docx/pdf",
-             "not installed · pip install mammoth  ← install this to convert .doc without LibreOffice")
-    _dep_row(mky_ok, "markdownify",
-             "installed · cleaner .doc→.md via HTML",
-             "not installed · pip install markdownify  (optional, improves .doc→.md)")
-    _dep_row(rl_ok,  "reportlab",
-             "installed · .doc→.pdf plain-text fallback",
-             "not installed · pip install reportlab  (needed for .doc→.pdf without LibreOffice)")
-
-    st.caption(
-        "**Minimum for .doc support without LibreOffice:** `pip install mammoth reportlab markdownify`  |  "
-        "**Best quality:** install LibreOffice"
-    )
 
 # ── Supported formats reference ───────────────────────────────────────────────
 with st.expander("📋 Supported Input Formats"):
