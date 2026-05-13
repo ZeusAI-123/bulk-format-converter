@@ -6,14 +6,42 @@ Supports: Images, Audio, Documents (docx, doc, pdf, rtf, odt, txt, html, md, csv
 Run:
     streamlit run app.py
 
-Install:
-    pip install streamlit Pillow pydub python-docx pymupdf pypandoc
-    pip install openpyxl odfpy html2text markdown
-    # For audio: https://ffmpeg.org/download.html
-    # For .doc/.rtf/.odt: https://pandoc.org/installing.html
+Install (core):
+    pip install streamlit Pillow pydub python-docx pymupdf pypandoc openpyxl odfpy html2text markdown
+
+Install (optional but recommended):
+    # Audio codec support:
+    #   macOS:   brew install ffmpeg
+    #   Ubuntu:  sudo apt-get install ffmpeg
+    #   Windows: https://ffmpeg.org/download.html
+
+    # Broad document conversion (pandoc):
+    #   macOS:   brew install pandoc
+    #   Ubuntu:  sudo apt-get install pandoc
+    #   Windows: https://pandoc.org/installing.html
+
+    # Legacy .doc support (LibreOffice):
+    #   macOS:   brew install --cask libreoffice
+    #   Ubuntu:  sudo apt-get install libreoffice
+    #   Windows: https://www.libreoffice.org/download/download/
+    #
+    # Streamlit Cloud deployment note:
+    #   Add a packages.txt file to your repo containing:
+    #       libreoffice
+    #       pandoc
+    #   Streamlit Cloud will install them automatically via apt-get.
+
+Dependency matrix for .doc files:
+    .doc → .docx        LibreOffice only
+    .doc → .txt         LibreOffice + python-docx  (no pandoc needed)
+    .doc → .html/.md    LibreOffice + pandoc
+    .doc → .pdf         LibreOffice only (direct export, no pandoc needed)
+    .doc → .rtf/.odt    LibreOffice + pandoc
 """
 
 import io
+import shutil
+import subprocess
 import zipfile
 import tempfile
 from pathlib import Path
@@ -57,16 +85,6 @@ DEFAULT_QUALITY = {
     "mp3": 192, "ogg": 192, "aac": 192, "wav": None, "flac": None,
 }
 
-# Which conversions are supported natively (no pandoc needed)
-NATIVE_DOC_PAIRS = {
-    # (input_ext, output_ext)
-    (".txt",  ".docx"), (".docx", ".txt"),
-    (".txt",  ".html"), (".html", ".txt"),
-    (".txt",  ".md"),   (".md",   ".txt"),
-    (".csv",  ".xlsx"), (".xlsx", ".csv"),
-    (".pdf",  ".txt"),
-}
-
 # Conversions that require pandoc
 PANDOC_INPUTS  = {".docx", ".doc", ".rtf", ".odt", ".html", ".htm", ".md", ".txt", ".pdf"}
 PANDOC_OUTPUTS = {"docx", "pdf", "rtf", "odt", "html", "md", "txt"}
@@ -88,7 +106,77 @@ def get_valid_outputs(file_type: str) -> set:
     }.get(file_type, set())
 
 
-# ── Image ─────────────────────────────────────────────────────────────────────
+# ============================================================
+# DEPENDENCY CHECKS
+# ============================================================
+
+def _check_libreoffice() -> tuple[bool, str]:
+    """
+    Locate the LibreOffice CLI binary (soffice).
+
+    Returns (found: bool, path_or_message: str).
+    Checks common install paths on all platforms so this works on
+    macOS (Homebrew / .app bundle), Linux (apt / snap), and Windows.
+    """
+    # 1. Already on PATH?
+    soffice = shutil.which("soffice")
+    if soffice:
+        return True, soffice
+
+    # 2. Common hard-coded locations
+    candidates = [
+        # macOS app bundle
+        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        # Ubuntu snap
+        "/snap/bin/libreoffice",
+        # Ubuntu / Debian apt
+        "/usr/bin/soffice",
+        "/usr/lib/libreoffice/program/soffice",
+        # Windows (common install paths — works even on Linux CI)
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+    ]
+    for path in candidates:
+        if Path(path).exists():
+            return True, path
+
+    return False, (
+        "LibreOffice not found. Install it and make sure `soffice` is on PATH.\n"
+        "  macOS:   brew install --cask libreoffice\n"
+        "  Ubuntu:  sudo apt-get install libreoffice\n"
+        "  Windows: https://www.libreoffice.org/download/download/\n"
+        "  Streamlit Cloud: add 'libreoffice' to packages.txt"
+    )
+
+
+def _check_pandoc() -> tuple[bool, str]:
+    """Return (found, path_or_message) for Pandoc."""
+    try:
+        import pypandoc
+        # pypandoc.get_pandoc_path() raises OSError when pandoc is missing
+        path = pypandoc.get_pandoc_path()
+        return True, path
+    except OSError:
+        pass
+    except ImportError:
+        pass
+
+    pandoc = shutil.which("pandoc")
+    if pandoc:
+        return True, pandoc
+
+    return False, (
+        "Pandoc not found. Install it:\n"
+        "  macOS:   brew install pandoc\n"
+        "  Ubuntu:  sudo apt-get install pandoc\n"
+        "  Windows: https://pandoc.org/installing.html\n"
+        "  Streamlit Cloud: add 'pandoc' to packages.txt"
+    )
+
+
+# ============================================================
+# IMAGE CONVERSION
+# ============================================================
 
 def convert_image(input_path: Path, output_path: Path, quality):
     from PIL import Image
@@ -104,7 +192,9 @@ def convert_image(input_path: Path, output_path: Path, quality):
     img.save(output_path, **save_kwargs)
 
 
-# ── Audio ─────────────────────────────────────────────────────────────────────
+# ============================================================
+# AUDIO CONVERSION
+# ============================================================
 
 def convert_audio(input_path: Path, output_path: Path, bitrate):
     from pydub import AudioSegment
@@ -115,7 +205,9 @@ def convert_audio(input_path: Path, output_path: Path, bitrate):
     audio.export(str(output_path), **export_kwargs)
 
 
-# ── Document helpers ──────────────────────────────────────────────────────────
+# ============================================================
+# DOCUMENT HELPERS
+# ============================================================
 
 def _pdf_to_text(input_path: Path) -> str:
     import fitz  # PyMuPDF
@@ -151,10 +243,16 @@ def _csv_to_xlsx(input_path: Path, output_path: Path):
 
 
 def _try_pandoc(input_path: Path, output_path: Path):
-    """Use pypandoc for broad format coverage."""
+    """
+    Convert via pypandoc. Raises a clear RuntimeError when pandoc is absent
+    rather than surfacing pypandoc's raw OSError.
+    """
+    pandoc_ok, pandoc_msg = _check_pandoc()
+    if not pandoc_ok:
+        raise RuntimeError(pandoc_msg)
+
     import pypandoc
     out_fmt = output_path.suffix.lstrip(".")
-    # pandoc uses 'docx' for both .docx input and output
     pypandoc.convert_file(
         str(input_path),
         to=out_fmt,
@@ -163,71 +261,242 @@ def _try_pandoc(input_path: Path, output_path: Path):
     )
 
 
+# ── .doc → .docx via LibreOffice ─────────────────────────────────────────────
+
+def _doc_to_docx_via_libreoffice(input_path: Path, work_dir: Path) -> Path:
+    """
+    Convert a legacy binary .doc file (or any LO-readable format) to .docx
+    by shelling out to `soffice --headless`.
+
+    LibreOffice always writes the output into the *directory* specified by
+    --outdir, naming it <stem>.docx.  We point it at a dedicated temp
+    subdirectory so the output file is predictable and isolated.
+
+    Parameters
+    ----------
+    input_path : Path
+        Absolute path to the source .doc file.
+    work_dir : Path
+        A writable directory used as LibreOffice's output directory.
+        The caller is responsible for its lifecycle.
+
+    Returns
+    -------
+    Path
+        Absolute path to the freshly written .docx file.
+
+    Raises
+    ------
+    RuntimeError
+        If LibreOffice is not installed, or if the conversion process
+        exits with a non-zero return code.
+    """
+    lo_ok, lo_path = _check_libreoffice()
+    if not lo_ok:
+        raise RuntimeError(lo_path)  # lo_path contains the helpful install message
+
+    cmd = [
+        lo_path,
+        "--headless",
+        "--norestore",           # skip crash-recovery dialog
+        "--nofirststartwizard",  # skip the welcome wizard
+        "--convert-to", "docx:MS Word 2007 XML",  # explicit filter avoids ambiguity
+        "--outdir", str(work_dir),
+        str(input_path),
+    ]
+
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=120,             # 2-minute hard cap; large docs can be slow
+    )
+
+    if result.returncode != 0:
+        stderr_text = result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(
+            f"LibreOffice conversion failed (exit {result.returncode}).\n{stderr_text}"
+        )
+
+    # LibreOffice names the output file after the input stem
+    expected = work_dir / f"{input_path.stem}.docx"
+    if not expected.exists():
+        # Scan for any .docx LibreOffice may have produced
+        matches = list(work_dir.glob("*.docx"))
+        if not matches:
+            raise RuntimeError(
+                f"LibreOffice ran successfully but no .docx was found in {work_dir}. "
+                "The input file may be corrupt or in an unsupported variant."
+            )
+        expected = matches[0]
+
+    return expected
+
+
+# ── .doc entry-point ──────────────────────────────────────────────────────────
+
+def _convert_doc_file(input_path: Path, output_path: Path):
+    """
+    Full pipeline for legacy .doc input files.
+
+    Strategy
+    --------
+    1.  If the caller only wants .docx → run LibreOffice and copy result.
+    2.  If the caller wants .pdf   → use LibreOffice's native PDF export
+        (higher fidelity than docx→pandoc→pdf).
+    3.  For everything else        → LibreOffice to .docx first, then hand
+        the .docx off to the normal convert_doc() path (python-docx / pandoc).
+
+    This keeps LibreOffice concerns contained here and reuses all existing
+    conversion logic for downstream formats.
+    """
+    lo_ok, lo_path = _check_libreoffice()
+    if not lo_ok:
+        raise RuntimeError(
+            f"Cannot convert .doc files: {lo_path}"
+        )
+
+    out_ext = output_path.suffix.lower()
+
+    with tempfile.TemporaryDirectory(prefix="bulk_conv_lo_") as lo_tmp:
+        lo_dir = Path(lo_tmp)
+
+        # ── Special case: .doc → .pdf (LibreOffice native, best fidelity) ──
+        if out_ext == ".pdf":
+            cmd = [
+                lo_path,
+                "--headless",
+                "--norestore",
+                "--nofirststartwizard",
+                "--convert-to", "pdf",
+                "--outdir", str(lo_dir),
+                str(input_path),
+            ]
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                stderr_text = result.stderr.decode(errors="replace").strip()
+                raise RuntimeError(
+                    f"LibreOffice PDF export failed (exit {result.returncode}).\n{stderr_text}"
+                )
+            pdf_out = lo_dir / f"{input_path.stem}.pdf"
+            if not pdf_out.exists():
+                matches = list(lo_dir.glob("*.pdf"))
+                if not matches:
+                    raise RuntimeError(
+                        "LibreOffice ran but produced no PDF. "
+                        "The file may be corrupt or password-protected."
+                    )
+                pdf_out = matches[0]
+            shutil.copy2(pdf_out, output_path)
+            return
+
+        # ── All other targets: .doc → .docx → target ────────────────────────
+        docx_path = _doc_to_docx_via_libreoffice(input_path, lo_dir)
+
+        # If the final target is .docx we are done
+        if out_ext == ".docx":
+            shutil.copy2(docx_path, output_path)
+            return
+
+        # Hand the intermediate .docx to the generic converter
+        convert_doc(docx_path, output_path)
+
+
+# ============================================================
+# MAIN DOCUMENT CONVERSION DISPATCHER
+# ============================================================
+
 def convert_doc(input_path: Path, output_path: Path):
+    """
+    Convert between document formats.
+
+    Routing logic (in priority order):
+    1. Legacy .doc → handled entirely by _convert_doc_file() via LibreOffice
+    2. PDF input   → PyMuPDF text extraction + optional pandoc
+    3. CSV ↔ XLSX  → openpyxl (no pandoc needed)
+    4. TXT → DOCX  → python-docx (no pandoc needed)
+    5. DOCX → TXT  → python-docx (no pandoc needed)
+    6. Everything else → pandoc via _try_pandoc()
+    """
     in_ext  = input_path.suffix.lower()
     out_ext = output_path.suffix.lower()
     out_fmt = out_ext.lstrip(".")
 
-    # ── PDF input ────────────────────────────────────────────────────────────
+    # ── 1. Legacy binary .doc (and variant Word formats) ─────────────────────
+    #
+    # Pandoc cannot read the legacy binary .doc format directly; it requires
+    # LibreOffice as an intermediary.  We also catch .dotx / .dotm / .docm
+    # here because LibreOffice handles those more reliably than pandoc does.
+    #
+    LIBREOFFICE_ONLY_INPUTS = {".doc", ".dotx", ".dotm", ".docm"}
+    if in_ext in LIBREOFFICE_ONLY_INPUTS:
+        _convert_doc_file(input_path, output_path)
+        return
+
+    # ── 2. PDF input ──────────────────────────────────────────────────────────
     if in_ext == ".pdf":
         text = _pdf_to_text(input_path)
         if out_ext == ".txt":
             output_path.write_text(text, encoding="utf-8")
-        elif out_ext in (".docx", ".doc"):
+        elif out_ext in (".docx",):
             from docx import Document
             doc = Document()
             for line in text.split("\n"):
                 doc.add_paragraph(line)
             doc.save(str(output_path))
         elif out_ext == ".html":
-            html = "<html><body>" + "".join(f"<p>{l}</p>" for l in text.split("\n") if l.strip()) + "</body></html>"
+            html = (
+                "<html><body>"
+                + "".join(f"<p>{l}</p>" for l in text.split("\n") if l.strip())
+                + "</body></html>"
+            )
             output_path.write_text(html, encoding="utf-8")
         elif out_ext in (".md", ".rtf", ".odt"):
             _try_pandoc(input_path, output_path)
         else:
             raise ValueError(f"PDF → {out_ext} not supported")
+        return
 
-    # ── CSV ↔ XLSX ───────────────────────────────────────────────────────────
-    elif in_ext == ".csv" and out_ext == ".xlsx":
+    # ── 3. CSV ↔ XLSX ─────────────────────────────────────────────────────────
+    if in_ext == ".csv" and out_ext == ".xlsx":
         _csv_to_xlsx(input_path, output_path)
+        return
 
-    elif in_ext == ".xlsx" and out_ext == ".csv":
-        csv_text = _read_xlsx_as_csv(input_path)
-        output_path.write_text(csv_text, encoding="utf-8")
+    if in_ext == ".xlsx" and out_ext == ".csv":
+        output_path.write_text(_read_xlsx_as_csv(input_path), encoding="utf-8")
+        return
 
-    # ── TXT → DOCX ──────────────────────────────────────────────────────────
-    elif in_ext == ".txt" and out_ext in (".docx", ".doc"):
+    # ── 4. TXT → DOCX (python-docx, no pandoc) ───────────────────────────────
+    if in_ext == ".txt" and out_ext == ".docx":
         from docx import Document
         text = input_path.read_text(encoding="utf-8")
         doc  = Document()
         for line in text.split("\n"):
             doc.add_paragraph(line)
         doc.save(str(output_path))
+        return
 
-    # ── DOCX → TXT ──────────────────────────────────────────────────────────
-    elif in_ext in (".docx", ".doc", ".dotx", ".docm") and out_ext == ".txt":
-        if in_ext == ".docx":
-            output_path.write_text(_read_docx_text(input_path), encoding="utf-8")
-        else:
-            _try_pandoc(input_path, output_path)
+    # ── 5. DOCX → TXT (python-docx, no pandoc) ───────────────────────────────
+    if in_ext == ".docx" and out_ext == ".txt":
+        output_path.write_text(_read_docx_text(input_path), encoding="utf-8")
+        return
 
-    # ── TXT / MD / HTML → plain text ────────────────────────────────────────
-    elif in_ext in (".md", ".html", ".htm") and out_ext == ".txt":
+    # ── 6. Everything else: delegate to pandoc ────────────────────────────────
+    if in_ext in PANDOC_INPUTS and out_fmt in PANDOC_OUTPUTS:
         _try_pandoc(input_path, output_path)
+        return
 
-    # ── TXT → HTML / MD ─────────────────────────────────────────────────────
-    elif in_ext == ".txt" and out_ext in (".html", ".md"):
-        _try_pandoc(input_path, output_path)
-
-    # ── Everything else: delegate to pandoc ─────────────────────────────────
-    elif in_ext in PANDOC_INPUTS and out_fmt in PANDOC_OUTPUTS:
-        _try_pandoc(input_path, output_path)
-
-    else:
-        raise ValueError(f"Unsupported document conversion: {in_ext} → {out_ext}")
+    raise ValueError(f"Unsupported document conversion: {in_ext} → {out_ext}")
 
 
-# ── Result container ──────────────────────────────────────────────────────────
+# ============================================================
+# RESULT CONTAINER
+# ============================================================
 
 class ConversionResult:
     def __init__(self, source, target, status, error=""):
@@ -274,6 +543,10 @@ st.markdown("""
   .format-section { margin-bottom: 12px; }
   .format-section-title { font-family: 'Space Mono', monospace; font-size: 0.58rem; color: #555570; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 4px; }
 
+  .dep-ok   { color: #7fff6a; font-family: 'Space Mono', monospace; font-size: 0.7rem; }
+  .dep-warn { color: #ffcc44; font-family: 'Space Mono', monospace; font-size: 0.7rem; }
+  .dep-err  { color: #ff6aad; font-family: 'Space Mono', monospace; font-size: 0.7rem; }
+
   div[data-baseweb="select"] > div { background: #111118 !important; border-color: #1e1e2e !important; }
   .stSlider > div > div { background: #1e1e2e !important; }
   .stButton > button {
@@ -297,6 +570,32 @@ st.markdown("""
 st.markdown('<div class="main-title">Bulk<span>Convert</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="subtitle">Images · Audio · Documents — batch conversion</div>', unsafe_allow_html=True)
 
+# ── Dependency status panel ───────────────────────────────────────────────────
+# with st.expander("🔧 System Dependency Status"):
+#     lo_ok,  lo_msg  = _check_libreoffice()
+#     pan_ok, pan_msg = _check_pandoc()
+#
+#     lo_icon  = "✅" if lo_ok  else "❌"
+#     pan_icon = "✅" if pan_ok else "❌"
+#     lo_css   = "dep-ok" if lo_ok  else "dep-err"
+#     pan_css  = "dep-ok" if pan_ok else "dep-err"
+#
+#     st.markdown(
+#         f'<div class="{lo_css}">{lo_icon} LibreOffice — '
+#         f'{"found at: " + lo_msg if lo_ok else lo_msg}</div>',
+#         unsafe_allow_html=True,
+#     )
+#     st.markdown(
+#         f'<div class="{pan_css}">{pan_icon} Pandoc — '
+#         f'{"found at: " + pan_msg if pan_ok else pan_msg}</div>',
+#         unsafe_allow_html=True,
+#     )
+#     st.caption(
+#         "LibreOffice is required for .doc files. "
+#         "Pandoc is required for .rtf, .odt, .md, .html outputs. "
+#         "Both are optional for images and audio."
+#     )
+
 # ── Supported formats reference ───────────────────────────────────────────────
 with st.expander("📋 Supported Input Formats"):
     st.markdown("""
@@ -317,7 +616,8 @@ with st.expander("📋 Supported Input Formats"):
     </div>
     <div class="format-section">
       <div class="format-section-title">📄 Documents — Word</div>
-      <span class="format-badge">.docx</span><span class="format-badge">.doc</span>
+      <span class="format-badge">.docx</span>
+      <span class="format-badge">.doc ⚠️ LibreOffice required</span>
       <span class="format-badge">.dotx</span><span class="format-badge">.dotm</span>
       <span class="format-badge">.docm</span>
     </div>
@@ -356,10 +656,25 @@ with col1:
 with col2:
     target_format = st.selectbox("Target Format", FORMAT_MAP[file_type_label], label_visibility="collapsed")
 
-# Pandoc warning for formats that need it
-PANDOC_NEEDED_OUTPUTS = {"pdf", "rtf", "odt", "html", "md"}
-if file_type_label == "📄 Document" and target_format in PANDOC_NEEDED_OUTPUTS:
-    st.info("ℹ️ This format requires **Pandoc** to be installed. [Download Pandoc](https://pandoc.org/installing.html)", icon="ℹ️")
+# Inline warnings for formats that need specific tools
+PANDOC_NEEDED_OUTPUTS = {"rtf", "odt", "html", "md"}
+if file_type_label == "📄 Document":
+    if target_format == "pdf":
+        st.info(
+            "ℹ️ PDF output from .doc files uses LibreOffice directly. "
+            "Other document-to-PDF routes also require **Pandoc**.",
+            icon="ℹ️",
+        )
+    elif target_format in PANDOC_NEEDED_OUTPUTS:
+        pan_ok, _ = _check_pandoc()
+        if not pan_ok:
+            st.warning(
+                f"⚠️ `.{target_format}` output requires **Pandoc**, which was not found. "
+                "[Download Pandoc](https://pandoc.org/installing.html)",
+                icon="⚠️",
+            )
+        else:
+            st.info(f"ℹ️ `.{target_format}` output uses **Pandoc**.", icon="ℹ️")
 
 quality = None
 if target_format in QUALITY_FORMATS:
