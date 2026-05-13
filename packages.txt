@@ -1,0 +1,4 @@
+libreoffice
+pandoc
+ffmpeg
+antiword
