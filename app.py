@@ -297,23 +297,40 @@ def _doc_to_docx_via_libreoffice(input_path: Path, work_dir: Path) -> Path:
     """
     lo_ok, lo_path = _check_libreoffice()
     if not lo_ok:
-        raise RuntimeError(lo_path)  # lo_path contains the helpful install message
+        raise RuntimeError(lo_path)
+
+    # Streamlit Cloud (and other sandboxed environments) run with a read-only
+    # or missing HOME, which causes LibreOffice to SIGABRT (exit 134) when it
+    # tries to create its user-profile directory.  Pointing --env:UserInstallation
+    # at a fresh temp dir inside work_dir gives it a guaranteed writable location.
+    lo_profile = work_dir / "lo_profile"
+    lo_profile.mkdir(exist_ok=True)
+    profile_url = lo_profile.as_uri()  # file:///tmp/...
 
     cmd = [
         lo_path,
+        f"-env:UserInstallation={profile_url}",
         "--headless",
-        "--norestore",           # skip crash-recovery dialog
-        "--nofirststartwizard",  # skip the welcome wizard
-        "--convert-to", "docx:MS Word 2007 XML",  # explicit filter avoids ambiguity
+        "--norestore",
+        "--nofirststartwizard",
+        "--convert-to", "docx:MS Word 2007 XML",
         "--outdir", str(work_dir),
         str(input_path),
     ]
+
+    # Provide a minimal, safe environment.  Removing a broken/absent HOME
+    # prevents the "failed to launch javaldx" crash on restricted hosts.
+    import os
+    safe_env = {k: v for k, v in os.environ.items()
+                if k not in ("HOME", "USERPROFILE")}
+    safe_env["HOME"] = str(work_dir)  # point HOME at our writable dir
 
     result = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=120,             # 2-minute hard cap; large docs can be slow
+        timeout=120,
+        env=safe_env,
     )
 
     if result.returncode != 0:
@@ -487,14 +504,23 @@ def _convert_doc_file(input_path: Path, output_path: Path):
 
             # .doc → .pdf via LibreOffice native export (best fidelity)
             if out_ext == ".pdf":
+                lo_profile = lo_dir / "lo_profile"
+                lo_profile.mkdir(exist_ok=True)
+                import os
+                safe_env = {k: v for k, v in os.environ.items()
+                            if k not in ("HOME", "USERPROFILE")}
+                safe_env["HOME"] = str(lo_dir)
                 cmd = [
-                    lo_path, "--headless", "--norestore", "--nofirststartwizard",
+                    lo_path,
+                    f"-env:UserInstallation={lo_profile.as_uri()}",
+                    "--headless", "--norestore", "--nofirststartwizard",
                     "--convert-to", "pdf",
                     "--outdir", str(lo_dir),
                     str(input_path),
                 ]
                 result = subprocess.run(cmd, stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE, timeout=120)
+                                        stderr=subprocess.PIPE, timeout=120,
+                                        env=safe_env)
                 if result.returncode != 0:
                     raise RuntimeError(
                         f"LibreOffice PDF export failed (exit {result.returncode}).\n"
