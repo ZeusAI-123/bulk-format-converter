@@ -31,12 +31,16 @@ Install (optional but recommended):
     #       pandoc
     #   Streamlit Cloud will install them automatically via apt-get.
 
-Dependency matrix for .doc files:
-    .doc → .docx        LibreOffice only
-    .doc → .txt         LibreOffice + python-docx  (no pandoc needed)
-    .doc → .html/.md    LibreOffice + pandoc
-    .doc → .pdf         LibreOffice only (direct export, no pandoc needed)
-    .doc → .rtf/.odt    LibreOffice + pandoc
+Dependency matrix for .doc files (fallback chain — first available tool wins):
+    .doc → .txt     1) LibreOffice→docx→python-docx  2) mammoth  3) antiword CLI
+    .doc → .html    1) LibreOffice→docx→pandoc        2) mammoth (native HTML output)
+    .doc → .md      1) LibreOffice→docx→pandoc        2) mammoth→html→markdownify
+    .doc → .docx    1) LibreOffice                    2) mammoth→html→python-docx (lossy)
+    .doc → .pdf     1) LibreOffice (native)            2) txt→reportlab (plain text fallback)
+    .doc → .rtf     LibreOffice only  (no pure-Python fallback)
+    .doc → .odt     LibreOffice only  (no pure-Python fallback)
+
+    pip install mammoth markdownify reportlab   # enables all pure-Python fallbacks
 """
 
 import io
@@ -333,78 +337,275 @@ def _doc_to_docx_via_libreoffice(input_path: Path, work_dir: Path) -> Path:
     return expected
 
 
-# ── .doc entry-point ──────────────────────────────────────────────────────────
+# ── Pure-Python .doc fallbacks (no LibreOffice needed) ───────────────────────
+
+def _check_mammoth() -> bool:
+    """Return True if the `mammoth` package is importable."""
+    try:
+        import mammoth  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _check_markdownify() -> bool:
+    try:
+        import markdownify  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _check_reportlab() -> bool:
+    try:
+        from reportlab.pdfgen import canvas  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _check_antiword() -> tuple[bool, str]:
+    """Return (found, path) for the antiword CLI tool."""
+    path = shutil.which("antiword")
+    if path:
+        return True, path
+    return False, ""
+
+
+def _doc_extract_html_via_mammoth(input_path: Path) -> str:
+    """
+    Use mammoth to extract HTML from a .doc/.docx file.
+    Preserves headings, bold, italic, lists, links — loses tables and images.
+    """
+    import mammoth
+    with open(input_path, "rb") as f:
+        result = mammoth.convert_to_html(f)
+    return result.value  # raw HTML string
+
+
+def _doc_extract_text_via_mammoth(input_path: Path) -> str:
+    import mammoth
+    with open(input_path, "rb") as f:
+        result = mammoth.extract_raw_text(f)
+    return result.value
+
+
+def _doc_extract_text_via_antiword(input_path: Path) -> str:
+    aw_ok, aw_path = _check_antiword()
+    if not aw_ok:
+        raise RuntimeError("antiword not found")
+    result = subprocess.run(
+        [aw_path, str(input_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode(errors="replace").strip())
+    return result.stdout.decode(errors="replace")
+
+
+def _text_to_pdf_via_reportlab(text: str, output_path: Path):
+    """Render plain text into a basic PDF using reportlab."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.pdfgen import canvas as rl_canvas
+
+    c = rl_canvas.Canvas(str(output_path), pagesize=A4)
+    width, height = A4
+    margin = 2 * cm
+    line_height = 14
+    x = margin
+    y = height - margin
+
+    for raw_line in text.splitlines():
+        # Wrap very long lines at ~100 chars
+        for chunk_start in range(0, max(len(raw_line), 1), 100):
+            line = raw_line[chunk_start:chunk_start + 100]
+            if y < margin:
+                c.showPage()
+                y = height - margin
+            c.setFont("Helvetica", 10)
+            c.drawString(x, y, line)
+            y -= line_height
+    c.save()
+
+
+def _html_to_docx(html: str, output_path: Path):
+    """
+    Convert an HTML string to .docx via python-docx.
+    Basic: strips tags and writes paragraphs — use LibreOffice for rich output.
+    """
+    import re
+    from docx import Document
+    # Strip HTML tags, decode common entities
+    text = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
+    text = re.sub(r"<p[^>]*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</p>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    for ent, char in [("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"),
+                      ("&nbsp;", " "), ("&quot;", '"'), ("&#39;", "'")]:
+        text = text.replace(ent, char)
+    doc = Document()
+    for line in text.split("\n"):
+        doc.add_paragraph(line)
+    doc.save(str(output_path))
+
+
+# ── .doc entry-point with full fallback chain ─────────────────────────────────
 
 def _convert_doc_file(input_path: Path, output_path: Path):
     """
     Full pipeline for legacy .doc input files.
 
-    Strategy
-    --------
-    1.  If the caller only wants .docx → run LibreOffice and copy result.
-    2.  If the caller wants .pdf   → use LibreOffice's native PDF export
-        (higher fidelity than docx→pandoc→pdf).
-    3.  For everything else        → LibreOffice to .docx first, then hand
-        the .docx off to the normal convert_doc() path (python-docx / pandoc).
+    Fallback chain (tried in order, first success wins):
 
-    This keeps LibreOffice concerns contained here and reuses all existing
-    conversion logic for downstream formats.
+        Tier 1 — LibreOffice (highest fidelity, all targets)
+            .doc → LibreOffice → .docx → python-docx / pandoc → target
+            .doc → LibreOffice → .pdf  (native, best quality)
+
+        Tier 2 — mammoth (pure Python, no system install needed)
+            .doc → mammoth → HTML → target
+            Supports: txt, html, md (via markdownify), docx (via html_to_docx),
+                      pdf (via reportlab plain-text render)
+
+        Tier 3 — antiword CLI (txt only, very lightweight)
+            .doc → antiword → txt → target
+
+        If every tier fails, a single consolidated error is raised listing
+        which tools to install to unlock better results.
     """
+    out_ext = output_path.suffix.lower()
     lo_ok, lo_path = _check_libreoffice()
-    if not lo_ok:
+
+    # ════════════════════════════════════════════════════════════
+    # TIER 1 — LibreOffice
+    # ════════════════════════════════════════════════════════════
+    if lo_ok:
+        with tempfile.TemporaryDirectory(prefix="bulk_conv_lo_") as lo_tmp:
+            lo_dir = Path(lo_tmp)
+
+            # .doc → .pdf via LibreOffice native export (best fidelity)
+            if out_ext == ".pdf":
+                cmd = [
+                    lo_path, "--headless", "--norestore", "--nofirststartwizard",
+                    "--convert-to", "pdf",
+                    "--outdir", str(lo_dir),
+                    str(input_path),
+                ]
+                result = subprocess.run(cmd, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, timeout=120)
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"LibreOffice PDF export failed (exit {result.returncode}).\n"
+                        + result.stderr.decode(errors="replace").strip()
+                    )
+                pdf_out = lo_dir / f"{input_path.stem}.pdf"
+                if not pdf_out.exists():
+                    matches = list(lo_dir.glob("*.pdf"))
+                    if not matches:
+                        raise RuntimeError(
+                            "LibreOffice ran but produced no PDF. "
+                            "The file may be corrupt or password-protected."
+                        )
+                    pdf_out = matches[0]
+                shutil.copy2(pdf_out, output_path)
+                return
+
+            # All other targets: .doc → .docx (intermediate) → target
+            docx_path = _doc_to_docx_via_libreoffice(input_path, lo_dir)
+            if out_ext == ".docx":
+                shutil.copy2(docx_path, output_path)
+                return
+            convert_doc(docx_path, output_path)
+            return
+
+    # ════════════════════════════════════════════════════════════
+    # TIER 2 — mammoth  (pure Python, no system dependency)
+    # ════════════════════════════════════════════════════════════
+    if _check_mammoth():
+        try:
+            if out_ext == ".txt":
+                text = _doc_extract_text_via_mammoth(input_path)
+                output_path.write_text(text, encoding="utf-8")
+                return
+
+            if out_ext == ".html":
+                html = _doc_extract_html_via_mammoth(input_path)
+                output_path.write_text(html, encoding="utf-8")
+                return
+
+            if out_ext == ".md":
+                html = _doc_extract_html_via_mammoth(input_path)
+                if _check_markdownify():
+                    import markdownify
+                    md = markdownify.markdownify(html, heading_style="ATX")
+                else:
+                    # Strip tags as a last resort
+                    import re
+                    md = re.sub(r"<[^>]+>", "", html)
+                output_path.write_text(md, encoding="utf-8")
+                return
+
+            if out_ext == ".docx":
+                html = _doc_extract_html_via_mammoth(input_path)
+                _html_to_docx(html, output_path)
+                return
+
+            if out_ext == ".pdf":
+                if _check_reportlab():
+                    text = _doc_extract_text_via_mammoth(input_path)
+                    _text_to_pdf_via_reportlab(text, output_path)
+                    return
+                # reportlab absent — fall through to Tier 3
+
+            # .rtf / .odt — mammoth can't produce these; fall through
+        except Exception as mammoth_err:
+            # mammoth failed on this specific file; try next tier
+            _mammoth_err = str(mammoth_err)
+    else:
+        _mammoth_err = "mammoth not installed (pip install mammoth)"
+
+    # ════════════════════════════════════════════════════════════
+    # TIER 3 — antiword CLI  (txt only)
+    # ════════════════════════════════════════════════════════════
+    aw_ok, _ = _check_antiword()
+    if aw_ok and out_ext == ".txt":
+        text = _doc_extract_text_via_antiword(input_path)
+        output_path.write_text(text, encoding="utf-8")
+        return
+
+    # ════════════════════════════════════════════════════════════
+    # All tiers exhausted — emit a clear, actionable error
+    # ════════════════════════════════════════════════════════════
+    lo_install = (
+        "  macOS:   brew install --cask libreoffice\n"
+        "  Ubuntu:  sudo apt-get install libreoffice\n"
+        "  Windows: https://www.libreoffice.org/download/download/\n"
+        "  Streamlit Cloud: add 'libreoffice' to packages.txt"
+    )
+
+    # Formats that only LibreOffice can produce
+    if out_ext in (".rtf", ".odt"):
         raise RuntimeError(
-            f"Cannot convert .doc files: {lo_path}"
+            f".doc → {out_ext} requires LibreOffice (no pure-Python fallback exists).\n"
+            + lo_install
         )
 
-    out_ext = output_path.suffix.lower()
+    # PDF with no reportlab
+    if out_ext == ".pdf" and not _check_reportlab():
+        raise RuntimeError(
+            f".doc → .pdf: LibreOffice not found and reportlab is not installed.\n"
+            f"  Fix A (best quality): install LibreOffice\n{lo_install}\n"
+            f"  Fix B (plain-text PDF): pip install reportlab"
+        )
 
-    with tempfile.TemporaryDirectory(prefix="bulk_conv_lo_") as lo_tmp:
-        lo_dir = Path(lo_tmp)
-
-        # ── Special case: .doc → .pdf (LibreOffice native, best fidelity) ──
-        if out_ext == ".pdf":
-            cmd = [
-                lo_path,
-                "--headless",
-                "--norestore",
-                "--nofirststartwizard",
-                "--convert-to", "pdf",
-                "--outdir", str(lo_dir),
-                str(input_path),
-            ]
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=120,
-            )
-            if result.returncode != 0:
-                stderr_text = result.stderr.decode(errors="replace").strip()
-                raise RuntimeError(
-                    f"LibreOffice PDF export failed (exit {result.returncode}).\n{stderr_text}"
-                )
-            pdf_out = lo_dir / f"{input_path.stem}.pdf"
-            if not pdf_out.exists():
-                matches = list(lo_dir.glob("*.pdf"))
-                if not matches:
-                    raise RuntimeError(
-                        "LibreOffice ran but produced no PDF. "
-                        "The file may be corrupt or password-protected."
-                    )
-                pdf_out = matches[0]
-            shutil.copy2(pdf_out, output_path)
-            return
-
-        # ── All other targets: .doc → .docx → target ────────────────────────
-        docx_path = _doc_to_docx_via_libreoffice(input_path, lo_dir)
-
-        # If the final target is .docx we are done
-        if out_ext == ".docx":
-            shutil.copy2(docx_path, output_path)
-            return
-
-        # Hand the intermediate .docx to the generic converter
-        convert_doc(docx_path, output_path)
+    raise RuntimeError(
+        f".doc → {out_ext}: no conversion tool available.\n"
+        f"  Best fix:    install LibreOffice (full fidelity)\n{lo_install}\n"
+        f"  Python fix:  pip install mammoth markdownify reportlab\n"
+        f"  (mammoth supports txt / html / md / docx / pdf outputs without LibreOffice)"
+    )
 
 
 # ============================================================
@@ -416,7 +617,9 @@ def convert_doc(input_path: Path, output_path: Path):
     Convert between document formats.
 
     Routing logic (in priority order):
-    1. Legacy .doc → handled entirely by _convert_doc_file() via LibreOffice
+    1. Legacy .doc / .dotx / .dotm / .docm
+       → _convert_doc_file() which runs a 3-tier fallback chain:
+         LibreOffice → mammoth (pure Python) → antiword CLI
     2. PDF input   → PyMuPDF text extraction + optional pandoc
     3. CSV ↔ XLSX  → openpyxl (no pandoc needed)
     4. TXT → DOCX  → python-docx (no pandoc needed)
@@ -571,30 +774,47 @@ st.markdown('<div class="main-title">Bulk<span>Convert</span></div>', unsafe_all
 st.markdown('<div class="subtitle">Images · Audio · Documents — batch conversion</div>', unsafe_allow_html=True)
 
 # ── Dependency status panel ───────────────────────────────────────────────────
-# with st.expander("🔧 System Dependency Status"):
-#     lo_ok,  lo_msg  = _check_libreoffice()
-#     pan_ok, pan_msg = _check_pandoc()
-#
-#     lo_icon  = "✅" if lo_ok  else "❌"
-#     pan_icon = "✅" if pan_ok else "❌"
-#     lo_css   = "dep-ok" if lo_ok  else "dep-err"
-#     pan_css  = "dep-ok" if pan_ok else "dep-err"
-#
-#     st.markdown(
-#         f'<div class="{lo_css}">{lo_icon} LibreOffice — '
-#         f'{"found at: " + lo_msg if lo_ok else lo_msg}</div>',
-#         unsafe_allow_html=True,
-#     )
-#     st.markdown(
-#         f'<div class="{pan_css}">{pan_icon} Pandoc — '
-#         f'{"found at: " + pan_msg if pan_ok else pan_msg}</div>',
-#         unsafe_allow_html=True,
-#     )
-#     st.caption(
-#         "LibreOffice is required for .doc files. "
-#         "Pandoc is required for .rtf, .odt, .md, .html outputs. "
-#         "Both are optional for images and audio."
-#     )
+with st.expander("🔧 System Dependency Status"):
+    lo_ok,  lo_msg  = _check_libreoffice()
+    pan_ok, pan_msg = _check_pandoc()
+    mam_ok          = _check_mammoth()
+    mky_ok          = _check_markdownify()
+    rl_ok           = _check_reportlab()
+    aw_ok, _        = _check_antiword()
+
+    def _dep_row(ok: bool, name: str, msg_ok: str, msg_fail: str):
+        icon  = "✅" if ok else "❌"
+        css   = "dep-ok" if ok else "dep-err"
+        label = msg_ok if ok else msg_fail
+        st.markdown(f'<div class="{css}">{icon} {name} — {label}</div>',
+                    unsafe_allow_html=True)
+
+    st.markdown("**System tools**")
+    _dep_row(lo_ok,  "LibreOffice",
+             f"found · {lo_msg}",
+             "not found · best quality for .doc — install: brew/apt libreoffice or add to packages.txt")
+    _dep_row(pan_ok, "Pandoc",
+             f"found · {pan_msg}",
+             "not found · needed for .rtf .odt .html .md outputs — install: brew/apt pandoc")
+    _dep_row(aw_ok,  "antiword",
+             "found · .doc→txt last-resort fallback",
+             "not found · optional: brew/apt antiword")
+
+    st.markdown("**Python packages** (pip install …)")
+    _dep_row(mam_ok, "mammoth",
+             "installed · .doc fallback for txt/html/md/docx/pdf",
+             "not installed · pip install mammoth  ← install this to convert .doc without LibreOffice")
+    _dep_row(mky_ok, "markdownify",
+             "installed · cleaner .doc→.md via HTML",
+             "not installed · pip install markdownify  (optional, improves .doc→.md)")
+    _dep_row(rl_ok,  "reportlab",
+             "installed · .doc→.pdf plain-text fallback",
+             "not installed · pip install reportlab  (needed for .doc→.pdf without LibreOffice)")
+
+    st.caption(
+        "**Minimum for .doc support without LibreOffice:** `pip install mammoth reportlab markdownify`  |  "
+        "**Best quality:** install LibreOffice"
+    )
 
 # ── Supported formats reference ───────────────────────────────────────────────
 with st.expander("📋 Supported Input Formats"):
