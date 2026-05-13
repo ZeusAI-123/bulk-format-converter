@@ -498,53 +498,59 @@ def _convert_doc_file(input_path: Path, output_path: Path):
     # ════════════════════════════════════════════════════════════
     # TIER 1 — LibreOffice
     # ════════════════════════════════════════════════════════════
+    _lo_err = None
     if lo_ok:
-        with tempfile.TemporaryDirectory(prefix="bulk_conv_lo_") as lo_tmp:
-            lo_dir = Path(lo_tmp)
+        try:
+            with tempfile.TemporaryDirectory(prefix="bulk_conv_lo_") as lo_tmp:
+                lo_dir = Path(lo_tmp)
 
-            # .doc → .pdf via LibreOffice native export (best fidelity)
-            if out_ext == ".pdf":
-                lo_profile = lo_dir / "lo_profile"
-                lo_profile.mkdir(exist_ok=True)
-                import os
-                safe_env = {k: v for k, v in os.environ.items()
-                            if k not in ("HOME", "USERPROFILE")}
-                safe_env["HOME"] = str(lo_dir)
-                cmd = [
-                    lo_path,
-                    f"-env:UserInstallation={lo_profile.as_uri()}",
-                    "--headless", "--norestore", "--nofirststartwizard",
-                    "--convert-to", "pdf",
-                    "--outdir", str(lo_dir),
-                    str(input_path),
-                ]
-                result = subprocess.run(cmd, stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE, timeout=120,
-                                        env=safe_env)
-                if result.returncode != 0:
-                    raise RuntimeError(
-                        f"LibreOffice PDF export failed (exit {result.returncode}).\n"
-                        + result.stderr.decode(errors="replace").strip()
-                    )
-                pdf_out = lo_dir / f"{input_path.stem}.pdf"
-                if not pdf_out.exists():
-                    matches = list(lo_dir.glob("*.pdf"))
-                    if not matches:
+                # .doc → .pdf via LibreOffice native export (best fidelity)
+                if out_ext == ".pdf":
+                    lo_profile = lo_dir / "lo_profile"
+                    lo_profile.mkdir(exist_ok=True)
+                    import os
+                    safe_env = {k: v for k, v in os.environ.items()
+                                if k not in ("HOME", "USERPROFILE")}
+                    safe_env["HOME"] = str(lo_dir)
+                    cmd = [
+                        lo_path,
+                        f"-env:UserInstallation={lo_profile.as_uri()}",
+                        "--headless", "--norestore", "--nofirststartwizard",
+                        "--convert-to", "pdf",
+                        "--outdir", str(lo_dir),
+                        str(input_path),
+                    ]
+                    result = subprocess.run(cmd, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, timeout=120,
+                                            env=safe_env)
+                    if result.returncode != 0:
                         raise RuntimeError(
-                            "LibreOffice ran but produced no PDF. "
-                            "The file may be corrupt or password-protected."
+                            f"LibreOffice PDF export failed (exit {result.returncode}).\n"
+                            + result.stderr.decode(errors="replace").strip()
                         )
-                    pdf_out = matches[0]
-                shutil.copy2(pdf_out, output_path)
+                    pdf_out = lo_dir / f"{input_path.stem}.pdf"
+                    if not pdf_out.exists():
+                        matches = list(lo_dir.glob("*.pdf"))
+                        if not matches:
+                            raise RuntimeError(
+                                "LibreOffice ran but produced no PDF. "
+                                "The file may be corrupt or password-protected."
+                            )
+                        pdf_out = matches[0]
+                    shutil.copy2(pdf_out, output_path)
+                    return
+
+                # All other targets: .doc → .docx (intermediate) → target
+                docx_path = _doc_to_docx_via_libreoffice(input_path, lo_dir)
+                if out_ext == ".docx":
+                    shutil.copy2(docx_path, output_path)
+                    return
+                convert_doc(docx_path, output_path)
                 return
 
-            # All other targets: .doc → .docx (intermediate) → target
-            docx_path = _doc_to_docx_via_libreoffice(input_path, lo_dir)
-            if out_ext == ".docx":
-                shutil.copy2(docx_path, output_path)
-                return
-            convert_doc(docx_path, output_path)
-            return
+        except Exception as e:
+            # LibreOffice crashed or failed — fall through to Tier 2
+            _lo_err = str(e)
 
     # ════════════════════════════════════════════════════════════
     # TIER 2 — mammoth  (pure Python, no system dependency)
@@ -857,25 +863,6 @@ with col1:
 with col2:
     target_format = st.selectbox("Target Format", FORMAT_MAP[file_type_label], label_visibility="collapsed")
 
-# Inline warnings for formats that need specific tools
-PANDOC_NEEDED_OUTPUTS = {"rtf", "odt", "html", "md"}
-if file_type_label == "📄 Document":
-    if target_format == "pdf":
-        st.info(
-            "ℹ️ PDF output from .doc files uses LibreOffice directly. "
-            "Other document-to-PDF routes also require **Pandoc**.",
-            icon="ℹ️",
-        )
-    elif target_format in PANDOC_NEEDED_OUTPUTS:
-        pan_ok, _ = _check_pandoc()
-        if not pan_ok:
-            st.warning(
-                f"⚠️ `.{target_format}` output requires **Pandoc**, which was not found. "
-                "[Download Pandoc](https://pandoc.org/installing.html)",
-                icon="⚠️",
-            )
-        else:
-            st.info(f"ℹ️ `.{target_format}` output uses **Pandoc**.", icon="ℹ️")
 
 quality = None
 if target_format in QUALITY_FORMATS:
