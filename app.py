@@ -1,10 +1,10 @@
 """
-Bulk Format Converter — Streamlit App (Standalone)
+Bulk Format Converter — Streamlit App (Zeus Doc Chat UI)
 ---------------------------------------------------
 Supports: Images, Audio, Documents (docx, doc, pdf, rtf, odt, txt, html, md, csv, xlsx)
 
 Run:
-    streamlit run app.py
+    streamlit run bulk_converter_zeus.py
 
 Install (core):
     pip install streamlit Pillow pydub python-docx pymupdf pypandoc openpyxl odfpy html2text markdown
@@ -30,17 +30,6 @@ Install (optional but recommended):
     #       libreoffice
     #       pandoc
     #   Streamlit Cloud will install them automatically via apt-get.
-
-Dependency matrix for .doc files (fallback chain — first available tool wins):
-    .doc → .txt     1) LibreOffice→docx→python-docx  2) mammoth  3) antiword CLI
-    .doc → .html    1) LibreOffice→docx→pandoc        2) mammoth (native HTML output)
-    .doc → .md      1) LibreOffice→docx→pandoc        2) mammoth→html→markdownify
-    .doc → .docx    1) LibreOffice                    2) mammoth→html→python-docx (lossy)
-    .doc → .pdf     1) LibreOffice (native)            2) txt→reportlab (plain text fallback)
-    .doc → .rtf     LibreOffice only  (no pure-Python fallback)
-    .doc → .odt     LibreOffice only  (no pure-Python fallback)
-
-    pip install mammoth markdownify reportlab   # enables all pure-Python fallbacks
 """
 
 import io
@@ -55,7 +44,7 @@ import streamlit as st
 
 
 # ============================================================
-# BACKEND — format definitions
+# BACKEND — format definitions (UNCHANGED)
 # ============================================================
 
 IMAGE_FORMATS = {
@@ -68,15 +57,10 @@ AUDIO_FORMATS = {
 }
 
 DOC_FORMATS = {
-    # Word
     ".docx", ".doc", ".dotx", ".dotm", ".docm",
-    # PDF
     ".pdf",
-    # Rich / Open
     ".rtf", ".odt",
-    # Plain / markup
     ".txt", ".md", ".html", ".htm",
-    # Data
     ".csv", ".xlsx",
 }
 
@@ -89,7 +73,6 @@ DEFAULT_QUALITY = {
     "mp3": 192, "ogg": 192, "aac": 192, "wav": None, "flac": None,
 }
 
-# Conversions that require pandoc
 PANDOC_INPUTS  = {".docx", ".doc", ".rtf", ".odt", ".html", ".htm", ".md", ".txt", ".pdf"}
 PANDOC_OUTPUTS = {"docx", "pdf", "rtf", "odt", "html", "md", "txt"}
 
@@ -111,39 +94,24 @@ def get_valid_outputs(file_type: str) -> set:
 
 
 # ============================================================
-# DEPENDENCY CHECKS
+# DEPENDENCY CHECKS (UNCHANGED)
 # ============================================================
 
 def _check_libreoffice() -> tuple[bool, str]:
-    """
-    Locate the LibreOffice CLI binary (soffice).
-
-    Returns (found: bool, path_or_message: str).
-    Checks common install paths on all platforms so this works on
-    macOS (Homebrew / .app bundle), Linux (apt / snap), and Windows.
-    """
-    # 1. Already on PATH?
     soffice = shutil.which("soffice")
     if soffice:
         return True, soffice
-
-    # 2. Common hard-coded locations
     candidates = [
-        # macOS app bundle
         "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-        # Ubuntu snap
         "/snap/bin/libreoffice",
-        # Ubuntu / Debian apt
         "/usr/bin/soffice",
         "/usr/lib/libreoffice/program/soffice",
-        # Windows (common install paths — works even on Linux CI)
         r"C:\Program Files\LibreOffice\program\soffice.exe",
         r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
     ]
     for path in candidates:
         if Path(path).exists():
             return True, path
-
     return False, (
         "LibreOffice not found. Install it and make sure `soffice` is on PATH.\n"
         "  macOS:   brew install --cask libreoffice\n"
@@ -154,21 +122,17 @@ def _check_libreoffice() -> tuple[bool, str]:
 
 
 def _check_pandoc() -> tuple[bool, str]:
-    """Return (found, path_or_message) for Pandoc."""
     try:
         import pypandoc
-        # pypandoc.get_pandoc_path() raises OSError when pandoc is missing
         path = pypandoc.get_pandoc_path()
         return True, path
     except OSError:
         pass
     except ImportError:
         pass
-
     pandoc = shutil.which("pandoc")
     if pandoc:
         return True, pandoc
-
     return False, (
         "Pandoc not found. Install it:\n"
         "  macOS:   brew install pandoc\n"
@@ -179,7 +143,7 @@ def _check_pandoc() -> tuple[bool, str]:
 
 
 # ============================================================
-# IMAGE CONVERSION
+# IMAGE CONVERSION (UNCHANGED)
 # ============================================================
 
 def convert_image(input_path: Path, output_path: Path, quality):
@@ -197,7 +161,7 @@ def convert_image(input_path: Path, output_path: Path, quality):
 
 
 # ============================================================
-# AUDIO CONVERSION
+# AUDIO CONVERSION (UNCHANGED)
 # ============================================================
 
 def convert_audio(input_path: Path, output_path: Path, bitrate):
@@ -210,11 +174,11 @@ def convert_audio(input_path: Path, output_path: Path, bitrate):
 
 
 # ============================================================
-# DOCUMENT HELPERS
+# DOCUMENT HELPERS (UNCHANGED)
 # ============================================================
 
 def _pdf_to_text(input_path: Path) -> str:
-    import fitz  # PyMuPDF
+    import fitz
     doc = fitz.open(str(input_path))
     return "\n".join(page.get_text() for page in doc)
 
@@ -247,14 +211,9 @@ def _csv_to_xlsx(input_path: Path, output_path: Path):
 
 
 def _try_pandoc(input_path: Path, output_path: Path):
-    """
-    Convert via pypandoc. Raises a clear RuntimeError when pandoc is absent
-    rather than surfacing pypandoc's raw OSError.
-    """
     pandoc_ok, pandoc_msg = _check_pandoc()
     if not pandoc_ok:
         raise RuntimeError(pandoc_msg)
-
     import pypandoc
     out_fmt = output_path.suffix.lstrip(".")
     pypandoc.convert_file(
@@ -265,48 +224,13 @@ def _try_pandoc(input_path: Path, output_path: Path):
     )
 
 
-# ── .doc → .docx via LibreOffice ─────────────────────────────────────────────
-
 def _doc_to_docx_via_libreoffice(input_path: Path, work_dir: Path) -> Path:
-    """
-    Convert a legacy binary .doc file (or any LO-readable format) to .docx
-    by shelling out to `soffice --headless`.
-
-    LibreOffice always writes the output into the *directory* specified by
-    --outdir, naming it <stem>.docx.  We point it at a dedicated temp
-    subdirectory so the output file is predictable and isolated.
-
-    Parameters
-    ----------
-    input_path : Path
-        Absolute path to the source .doc file.
-    work_dir : Path
-        A writable directory used as LibreOffice's output directory.
-        The caller is responsible for its lifecycle.
-
-    Returns
-    -------
-    Path
-        Absolute path to the freshly written .docx file.
-
-    Raises
-    ------
-    RuntimeError
-        If LibreOffice is not installed, or if the conversion process
-        exits with a non-zero return code.
-    """
     lo_ok, lo_path = _check_libreoffice()
     if not lo_ok:
         raise RuntimeError(lo_path)
-
-    # Streamlit Cloud (and other sandboxed environments) run with a read-only
-    # or missing HOME, which causes LibreOffice to SIGABRT (exit 134) when it
-    # tries to create its user-profile directory.  Pointing --env:UserInstallation
-    # at a fresh temp dir inside work_dir gives it a guaranteed writable location.
     lo_profile = work_dir / "lo_profile"
     lo_profile.mkdir(exist_ok=True)
-    profile_url = lo_profile.as_uri()  # file:///tmp/...
-
+    profile_url = lo_profile.as_uri()
     cmd = [
         lo_path,
         f"-env:UserInstallation={profile_url}",
@@ -317,14 +241,10 @@ def _doc_to_docx_via_libreoffice(input_path: Path, work_dir: Path) -> Path:
         "--outdir", str(work_dir),
         str(input_path),
     ]
-
-    # Provide a minimal, safe environment.  Removing a broken/absent HOME
-    # prevents the "failed to launch javaldx" crash on restricted hosts.
     import os
     safe_env = {k: v for k, v in os.environ.items()
                 if k not in ("HOME", "USERPROFILE")}
-    safe_env["HOME"] = str(work_dir)  # point HOME at our writable dir
-
+    safe_env["HOME"] = str(work_dir)
     result = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -332,34 +252,25 @@ def _doc_to_docx_via_libreoffice(input_path: Path, work_dir: Path) -> Path:
         timeout=120,
         env=safe_env,
     )
-
     if result.returncode != 0:
         stderr_text = result.stderr.decode(errors="replace").strip()
         raise RuntimeError(
             f"LibreOffice conversion failed (exit {result.returncode}).\n{stderr_text}"
         )
-
-    # LibreOffice names the output file after the input stem
     expected = work_dir / f"{input_path.stem}.docx"
     if not expected.exists():
-        # Scan for any .docx LibreOffice may have produced
         matches = list(work_dir.glob("*.docx"))
         if not matches:
             raise RuntimeError(
-                f"LibreOffice ran successfully but no .docx was found in {work_dir}. "
-                "The input file may be corrupt or in an unsupported variant."
+                f"LibreOffice ran successfully but no .docx was found in {work_dir}."
             )
         expected = matches[0]
-
     return expected
 
 
-# ── Pure-Python .doc fallbacks (no LibreOffice needed) ───────────────────────
-
 def _check_mammoth() -> bool:
-    """Return True if the `mammoth` package is importable."""
     try:
-        import mammoth  # noqa: F401
+        import mammoth
         return True
     except ImportError:
         return False
@@ -367,7 +278,7 @@ def _check_mammoth() -> bool:
 
 def _check_markdownify() -> bool:
     try:
-        import markdownify  # noqa: F401
+        import markdownify
         return True
     except ImportError:
         return False
@@ -375,14 +286,13 @@ def _check_markdownify() -> bool:
 
 def _check_reportlab() -> bool:
     try:
-        from reportlab.pdfgen import canvas  # noqa: F401
+        from reportlab.pdfgen import canvas
         return True
     except ImportError:
         return False
 
 
 def _check_antiword() -> tuple[bool, str]:
-    """Return (found, path) for the antiword CLI tool."""
     path = shutil.which("antiword")
     if path:
         return True, path
@@ -390,14 +300,10 @@ def _check_antiword() -> tuple[bool, str]:
 
 
 def _doc_extract_html_via_mammoth(input_path: Path) -> str:
-    """
-    Use mammoth to extract HTML from a .doc/.docx file.
-    Preserves headings, bold, italic, lists, links — loses tables and images.
-    """
     import mammoth
     with open(input_path, "rb") as f:
         result = mammoth.convert_to_html(f)
-    return result.value  # raw HTML string
+    return result.value
 
 
 def _doc_extract_text_via_mammoth(input_path: Path) -> str:
@@ -423,20 +329,16 @@ def _doc_extract_text_via_antiword(input_path: Path) -> str:
 
 
 def _text_to_pdf_via_reportlab(text: str, output_path: Path):
-    """Render plain text into a basic PDF using reportlab."""
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import cm
     from reportlab.pdfgen import canvas as rl_canvas
-
     c = rl_canvas.Canvas(str(output_path), pagesize=A4)
     width, height = A4
     margin = 2 * cm
     line_height = 14
     x = margin
     y = height - margin
-
     for raw_line in text.splitlines():
-        # Wrap very long lines at ~100 chars
         for chunk_start in range(0, max(len(raw_line), 1), 100):
             line = raw_line[chunk_start:chunk_start + 100]
             if y < margin:
@@ -449,13 +351,8 @@ def _text_to_pdf_via_reportlab(text: str, output_path: Path):
 
 
 def _html_to_docx(html: str, output_path: Path):
-    """
-    Convert an HTML string to .docx via python-docx.
-    Basic: strips tags and writes paragraphs — use LibreOffice for rich output.
-    """
     import re
     from docx import Document
-    # Strip HTML tags, decode common entities
     text = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
     text = re.sub(r"<p[^>]*>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"</p>", "", text, flags=re.IGNORECASE)
@@ -469,42 +366,15 @@ def _html_to_docx(html: str, output_path: Path):
     doc.save(str(output_path))
 
 
-# ── .doc entry-point with full fallback chain ─────────────────────────────────
-
 def _convert_doc_file(input_path: Path, output_path: Path):
-    """
-    Full pipeline for legacy .doc input files.
-
-    Fallback chain (tried in order, first success wins):
-
-        Tier 1 — LibreOffice (highest fidelity, all targets)
-            .doc → LibreOffice → .docx → python-docx / pandoc → target
-            .doc → LibreOffice → .pdf  (native, best quality)
-
-        Tier 2 — mammoth (pure Python, no system install needed)
-            .doc → mammoth → HTML → target
-            Supports: txt, html, md (via markdownify), docx (via html_to_docx),
-                      pdf (via reportlab plain-text render)
-
-        Tier 3 — antiword CLI (txt only, very lightweight)
-            .doc → antiword → txt → target
-
-        If every tier fails, a single consolidated error is raised listing
-        which tools to install to unlock better results.
-    """
     out_ext = output_path.suffix.lower()
     lo_ok, lo_path = _check_libreoffice()
 
-    # ════════════════════════════════════════════════════════════
-    # TIER 1 — LibreOffice
-    # ════════════════════════════════════════════════════════════
     _lo_err = None
     if lo_ok:
         try:
             with tempfile.TemporaryDirectory(prefix="bulk_conv_lo_") as lo_tmp:
                 lo_dir = Path(lo_tmp)
-
-                # .doc → .pdf via LibreOffice native export (best fidelity)
                 if out_ext == ".pdf":
                     lo_profile = lo_dir / "lo_profile"
                     lo_profile.mkdir(exist_ok=True)
@@ -532,148 +402,93 @@ def _convert_doc_file(input_path: Path, output_path: Path):
                     if not pdf_out.exists():
                         matches = list(lo_dir.glob("*.pdf"))
                         if not matches:
-                            raise RuntimeError(
-                                "LibreOffice ran but produced no PDF. "
-                                "The file may be corrupt or password-protected."
-                            )
+                            raise RuntimeError("LibreOffice ran but produced no PDF.")
                         pdf_out = matches[0]
                     shutil.copy2(pdf_out, output_path)
                     return
-
-                # All other targets: .doc → .docx (intermediate) → target
                 docx_path = _doc_to_docx_via_libreoffice(input_path, lo_dir)
                 if out_ext == ".docx":
                     shutil.copy2(docx_path, output_path)
                     return
                 convert_doc(docx_path, output_path)
                 return
-
         except Exception as e:
-            # LibreOffice crashed or failed — fall through to Tier 2
             _lo_err = str(e)
 
-    # ════════════════════════════════════════════════════════════
-    # TIER 2 — mammoth  (pure Python, no system dependency)
-    # ════════════════════════════════════════════════════════════
     if _check_mammoth():
         try:
             if out_ext == ".txt":
                 text = _doc_extract_text_via_mammoth(input_path)
                 output_path.write_text(text, encoding="utf-8")
                 return
-
             if out_ext == ".html":
                 html = _doc_extract_html_via_mammoth(input_path)
                 output_path.write_text(html, encoding="utf-8")
                 return
-
             if out_ext == ".md":
                 html = _doc_extract_html_via_mammoth(input_path)
                 if _check_markdownify():
                     import markdownify
                     md = markdownify.markdownify(html, heading_style="ATX")
                 else:
-                    # Strip tags as a last resort
                     import re
                     md = re.sub(r"<[^>]+>", "", html)
                 output_path.write_text(md, encoding="utf-8")
                 return
-
             if out_ext == ".docx":
                 html = _doc_extract_html_via_mammoth(input_path)
                 _html_to_docx(html, output_path)
                 return
-
             if out_ext == ".pdf":
                 if _check_reportlab():
                     text = _doc_extract_text_via_mammoth(input_path)
                     _text_to_pdf_via_reportlab(text, output_path)
                     return
-                # reportlab absent — fall through to Tier 3
-
-            # .rtf / .odt — mammoth can't produce these; fall through
         except Exception as mammoth_err:
-            # mammoth failed on this specific file; try next tier
             _mammoth_err = str(mammoth_err)
     else:
         _mammoth_err = "mammoth not installed (pip install mammoth)"
 
-    # ════════════════════════════════════════════════════════════
-    # TIER 3 — antiword CLI  (txt only)
-    # ════════════════════════════════════════════════════════════
     aw_ok, _ = _check_antiword()
     if aw_ok and out_ext == ".txt":
         text = _doc_extract_text_via_antiword(input_path)
         output_path.write_text(text, encoding="utf-8")
         return
 
-    # ════════════════════════════════════════════════════════════
-    # All tiers exhausted — emit a clear, actionable error
-    # ════════════════════════════════════════════════════════════
     lo_install = (
         "  macOS:   brew install --cask libreoffice\n"
         "  Ubuntu:  sudo apt-get install libreoffice\n"
         "  Windows: https://www.libreoffice.org/download/download/\n"
         "  Streamlit Cloud: add 'libreoffice' to packages.txt"
     )
-
-    # Formats that only LibreOffice can produce
     if out_ext in (".rtf", ".odt"):
         raise RuntimeError(
             f".doc → {out_ext} requires LibreOffice (no pure-Python fallback exists).\n"
             + lo_install
         )
-
-    # PDF with no reportlab
     if out_ext == ".pdf" and not _check_reportlab():
         raise RuntimeError(
             f".doc → .pdf: LibreOffice not found and reportlab is not installed.\n"
             f"  Fix A (best quality): install LibreOffice\n{lo_install}\n"
             f"  Fix B (plain-text PDF): pip install reportlab"
         )
-
     raise RuntimeError(
         f".doc → {out_ext}: no conversion tool available.\n"
         f"  Best fix:    install LibreOffice (full fidelity)\n{lo_install}\n"
         f"  Python fix:  pip install mammoth markdownify reportlab\n"
-        f"  (mammoth supports txt / html / md / docx / pdf outputs without LibreOffice)"
     )
 
 
-# ============================================================
-# MAIN DOCUMENT CONVERSION DISPATCHER
-# ============================================================
-
 def convert_doc(input_path: Path, output_path: Path):
-    """
-    Convert between document formats.
-
-    Routing logic (in priority order):
-    1. Legacy .doc / .dotx / .dotm / .docm
-       → _convert_doc_file() which runs a 3-tier fallback chain:
-         LibreOffice → mammoth (pure Python) → antiword CLI
-    2. PDF input   → PyMuPDF text extraction + optional pandoc
-    3. CSV ↔ XLSX  → openpyxl (no pandoc needed)
-    4. TXT → DOCX  → python-docx (no pandoc needed)
-    5. DOCX → TXT  → python-docx (no pandoc needed)
-    6. Everything else → pandoc via _try_pandoc()
-    """
     in_ext  = input_path.suffix.lower()
     out_ext = output_path.suffix.lower()
     out_fmt = out_ext.lstrip(".")
 
-    # ── 1. Legacy binary .doc (and variant Word formats) ─────────────────────
-    #
-    # Pandoc cannot read the legacy binary .doc format directly; it requires
-    # LibreOffice as an intermediary.  We also catch .dotx / .dotm / .docm
-    # here because LibreOffice handles those more reliably than pandoc does.
-    #
     LIBREOFFICE_ONLY_INPUTS = {".doc", ".dotx", ".dotm", ".docm"}
     if in_ext in LIBREOFFICE_ONLY_INPUTS:
         _convert_doc_file(input_path, output_path)
         return
 
-    # ── 2. PDF input ──────────────────────────────────────────────────────────
     if in_ext == ".pdf":
         text = _pdf_to_text(input_path)
         if out_ext == ".txt":
@@ -697,7 +512,6 @@ def convert_doc(input_path: Path, output_path: Path):
             raise ValueError(f"PDF → {out_ext} not supported")
         return
 
-    # ── 3. CSV ↔ XLSX ─────────────────────────────────────────────────────────
     if in_ext == ".csv" and out_ext == ".xlsx":
         _csv_to_xlsx(input_path, output_path)
         return
@@ -706,7 +520,6 @@ def convert_doc(input_path: Path, output_path: Path):
         output_path.write_text(_read_xlsx_as_csv(input_path), encoding="utf-8")
         return
 
-    # ── 4. TXT → DOCX (python-docx, no pandoc) ───────────────────────────────
     if in_ext == ".txt" and out_ext == ".docx":
         from docx import Document
         text = input_path.read_text(encoding="utf-8")
@@ -716,12 +529,10 @@ def convert_doc(input_path: Path, output_path: Path):
         doc.save(str(output_path))
         return
 
-    # ── 5. DOCX → TXT (python-docx, no pandoc) ───────────────────────────────
     if in_ext == ".docx" and out_ext == ".txt":
         output_path.write_text(_read_docx_text(input_path), encoding="utf-8")
         return
 
-    # ── 6. Everything else: delegate to pandoc ────────────────────────────────
     if in_ext in PANDOC_INPUTS and out_fmt in PANDOC_OUTPUTS:
         _try_pandoc(input_path, output_path)
         return
@@ -730,7 +541,7 @@ def convert_doc(input_path: Path, output_path: Path):
 
 
 # ============================================================
-# RESULT CONTAINER
+# RESULT CONTAINER (UNCHANGED)
 # ============================================================
 
 class ConversionResult:
@@ -742,111 +553,338 @@ class ConversionResult:
 
 
 # ============================================================
-# STREAMLIT UI
+# ZEUS DOC CHAT UI — GLOBAL CSS
 # ============================================================
 
-st.set_page_config(page_title="Bulk Format Converter", page_icon="⚡", layout="centered")
+st.set_page_config(
+    page_title="BulkConvert",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.markdown("""
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Space+Mono&family=Syne:wght@700;800&display=swap');
-  html, body, [class*="css"] { font-family: 'Syne', sans-serif; }
-  .stApp { background-color: #0a0a0f; color: #e8e8f0; }
-  #MainMenu, footer, header { visibility: hidden; }
-
-  .main-title { font-size: 2.6rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1; margin-bottom: 4px; }
-  .main-title span { color: #7fff6a; }
-  .subtitle { font-family: 'Space Mono', monospace; font-size: 0.68rem; letter-spacing: 0.12em; text-transform: uppercase; color: #555570; margin-bottom: 32px; }
-
-  .stat-card { background: #111118; border: 1px solid #1e1e2e; border-radius: 2px; padding: 18px 20px; text-align: center; }
-  .stat-number { font-size: 2rem; font-weight: 800; line-height: 1; }
-  .stat-label { font-family: 'Space Mono', monospace; font-size: 0.62rem; letter-spacing: 0.1em; text-transform: uppercase; color: #555570; margin-top: 4px; }
-
-  .result-success { border-left: 3px solid #7fff6a; padding: 8px 14px; background: #111118; margin: 4px 0; font-family: 'Space Mono', monospace; font-size: 0.72rem; }
-  .result-skipped { border-left: 3px solid #555570; padding: 8px 14px; background: #111118; margin: 4px 0; font-family: 'Space Mono', monospace; font-size: 0.72rem; color: #555570; }
-  .result-failed  { border-left: 3px solid #ff6aad; padding: 8px 14px; background: #111118; margin: 4px 0; font-family: 'Space Mono', monospace; font-size: 0.72rem; color: #ff6aad; }
-
-  .section-sep { border: none; border-top: 1px solid #1e1e2e; margin: 28px 0 20px; }
-  .section-label { font-family: 'Space Mono', monospace; font-size: 0.62rem; letter-spacing: 0.14em; text-transform: uppercase; color: #555570; margin-bottom: 12px; }
-
-  .format-badge {
-    display: inline-block; background: #1e1e2e; border: 1px solid #2e2e4e;
-    border-radius: 2px; padding: 2px 8px; margin: 2px;
-    font-family: 'Space Mono', monospace; font-size: 0.62rem;
-    color: #7fff6a; letter-spacing: 0.06em;
-  }
-  .format-section { margin-bottom: 12px; }
-  .format-section-title { font-family: 'Space Mono', monospace; font-size: 0.58rem; color: #555570; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 4px; }
-
-
-  div[data-baseweb="select"] > div { background: #111118 !important; border-color: #1e1e2e !important; }
-  .stSlider > div > div { background: #1e1e2e !important; }
-  .stButton > button {
-    background: #7fff6a !important; color: #0a0a0f !important;
-    font-family: 'Space Mono', monospace !important; font-weight: 700 !important;
-    font-size: 0.75rem !important; letter-spacing: 0.1em !important;
-    text-transform: uppercase !important; border: none !important;
-    border-radius: 0 !important; padding: 12px 28px !important;
-  }
-  .stButton > button:hover { background: #5fdf4a !important; }
-  .stDownloadButton > button {
-    background: #111118 !important; color: #7fff6a !important;
-    font-family: 'Space Mono', monospace !important; font-size: 0.72rem !important;
-    letter-spacing: 0.08em !important; border: 1px solid #7fff6a !important;
-    border-radius: 0 !important;
-  }
-</style>
-""", unsafe_allow_html=True)
-
-# ── Header ────────────────────────────────────────────────────────────────────
-st.markdown('<div class="main-title">Bulk<span>Convert</span></div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Images · Audio · Documents — batch conversion</div>', unsafe_allow_html=True)
-
-
-# ── Supported formats reference ───────────────────────────────────────────────
-with st.expander("📋 Supported Input Formats"):
+def inject_global_css():
     st.markdown("""
-    <div class="format-section">
-      <div class="format-section-title">🖼️ Images</div>
-      <span class="format-badge">.png</span><span class="format-badge">.jpg</span>
-      <span class="format-badge">.jpeg</span><span class="format-badge">.bmp</span>
-      <span class="format-badge">.gif</span><span class="format-badge">.tiff</span>
-      <span class="format-badge">.webp</span><span class="format-badge">.ico</span>
-      <span class="format-badge">.ppm</span>
-    </div>
-    <div class="format-section">
-      <div class="format-section-title">🎵 Audio</div>
-      <span class="format-badge">.mp3</span><span class="format-badge">.wav</span>
-      <span class="format-badge">.ogg</span><span class="format-badge">.flac</span>
-      <span class="format-badge">.aac</span><span class="format-badge">.wma</span>
-      <span class="format-badge">.m4a</span>
-    </div>
-    <div class="format-section">
-      <div class="format-section-title">📄 Documents — Word</div>
-      <span class="format-badge">.docx</span>
-      <span class="format-badge">.doc ⚠️ LibreOffice required</span>
-      <span class="format-badge">.dotx</span><span class="format-badge">.dotm</span>
-      <span class="format-badge">.docm</span>
-    </div>
-    <div class="format-section">
-      <div class="format-section-title">📄 Documents — Other</div>
-      <span class="format-badge">.pdf</span><span class="format-badge">.rtf</span>
-      <span class="format-badge">.odt</span><span class="format-badge">.txt</span>
-      <span class="format-badge">.md</span><span class="format-badge">.html</span>
-      <span class="format-badge">.htm</span><span class="format-badge">.csv</span>
-      <span class="format-badge">.xlsx</span>
-    </div>
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+    :root {
+        --bg-primary:    #071018;
+        --bg-secondary:  #0f172a;
+        --card-bg:       #111827;
+        --text-primary:  #f9fafb;
+        --text-secondary:#d1d5db;
+        --text-muted:    #9ca3af;
+        --border-color:  #1f2937;
+        --accent:        #4f46e5;
+        --accent-hover:  #6366f1;
+    }
+
+    html, body, [data-testid="stAppViewContainer"] {
+        background: var(--bg-primary) !important;
+        color: var(--text-primary) !important;
+        font-family: 'Inter', sans-serif !important;
+    }
+    [data-testid="stHeader"] { background: transparent !important; }
+    [data-testid="stSidebar"] {
+        background: var(--bg-secondary) !important;
+        border-right: 1px solid var(--border-color) !important;
+    }
+    [data-testid="stSidebar"] * { color: var(--text-secondary) !important; }
+
+    ::-webkit-scrollbar { width: 3px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #1e2030; border-radius: 3px; }
+
+    #MainMenu, footer, [data-testid="stDecoration"] { display: none !important; }
+
+    div[data-testid="stButton"] > button {
+        font-family: 'Inter', sans-serif !important;
+        transition: all 0.15s ease !important;
+    }
+    div[data-testid="stButton"] > button:focus { box-shadow: none !important; }
+
+    div[data-testid="stButton"] > button[kind="primary"] {
+        background: #3b5bdb !important;
+        border: none !important;
+        color: #fff !important;
+        border-radius: 8px !important;
+        font-weight: 500 !important;
+        font-size: 0.82rem !important;
+        font-family: 'Inter', sans-serif !important;
+        padding: 8px 16px !important;
+    }
+    div[data-testid="stButton"] > button[kind="primary"]:hover {
+        background: #3451c7 !important;
+    }
+    div[data-testid="stButton"] > button[kind="secondary"] {
+        background: transparent !important;
+        border: 1px solid #1c1e2a !important;
+        color: var(--text-secondary) !important;
+        border-radius: 8px !important;
+        font-size: 0.82rem !important;
+        font-weight: 400 !important;
+        padding: 6px 14px !important;
+        min-height: unset !important;
+    }
+    div[data-testid="stButton"] > button[kind="secondary"]:hover {
+        border-color: #2e3248 !important;
+        color: var(--text-primary) !important;
+    }
+
+    /* Download button — Zeus style */
+    [data-testid="stDownloadButton"] > button {
+        background: transparent !important;
+        border: 1px solid #3b5bdb !important;
+        color: #748ffc !important;
+        border-radius: 8px !important;
+        font-size: 0.82rem !important;
+        font-family: 'Inter', sans-serif !important;
+        font-weight: 500 !important;
+        padding: 8px 16px !important;
+    }
+    [data-testid="stDownloadButton"] > button:hover {
+        background: rgba(59,91,219,0.08) !important;
+    }
+
+    [data-testid="stFileUploader"] {
+        background: var(--bg-secondary) !important;
+        border: 1px dashed var(--border-color) !important;
+        border-radius: 8px !important;
+        padding: 8px !important;
+    }
+    [data-testid="stFileUploader"]:hover { border-color: var(--accent) !important; }
+
+    [data-testid="stMetric"] {
+        background: var(--bg-secondary) !important;
+        border: 1px solid var(--border-color) !important;
+        border-radius: 8px !important;
+        padding: 12px !important;
+    }
+    [data-testid="stAlert"] {
+        background: var(--bg-secondary) !important;
+        border: 1px solid var(--border-color) !important;
+        border-radius: 8px !important;
+        color: var(--text-secondary) !important;
+    }
+
+    /* Select boxes */
+    div[data-baseweb="select"] > div {
+        background: var(--bg-secondary) !important;
+        border-color: var(--border-color) !important;
+        border-radius: 8px !important;
+        color: var(--text-primary) !important;
+        font-family: 'Inter', sans-serif !important;
+        font-size: 0.82rem !important;
+    }
+    div[data-baseweb="select"] > div:focus-within {
+        border-color: var(--accent) !important;
+        box-shadow: 0 0 0 2px rgba(79,70,229,0.12) !important;
+    }
+
+    /* Slider */
+    .stSlider > div > div { background: var(--border-color) !important; }
+    .stSlider [data-baseweb="slider"] div[role="slider"] {
+        background: #3b5bdb !important;
+        border-color: #3b5bdb !important;
+    }
+
+    /* Expander */
+    [data-testid="stExpander"] {
+        background: var(--card-bg) !important;
+        border: 1px solid var(--border-color) !important;
+        border-radius: 8px !important;
+    }
+    [data-testid="stExpander"] summary {
+        color: var(--text-secondary) !important;
+        font-size: 0.82rem !important;
+    }
+
+    /* Caption */
+    [data-testid="stCaptionContainer"] {
+        color: var(--text-muted) !important;
+        font-size: 0.75rem !important;
+    }
+
+    /* Progress bar */
+    [data-testid="stProgressBar"] > div > div {
+        background: #3b5bdb !important;
+    }
+
+    /* ── shared component styles (Zeus Doc Chat) ── */
+    .zdc-section-label {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--text-secondary);
+        margin-bottom: 10px;
+        margin-top: 20px;
+    }
+    .zdc-section-label:first-child { margin-top: 0; }
+
+    .zdc-status-ok {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(34,197,94,0.06);
+        border: 1px solid rgba(34,197,94,0.18);
+        color: var(--text-primary);
+        font-size: 0.72rem;
+        font-weight: 500;
+        padding: 5px 12px;
+        border-radius: 100px;
+        margin-top: 8px;
+    }
+    .zdc-status-ok::before {
+        content: '';
+        width: 6px; height: 6px;
+        background: #4ade80;
+        border-radius: 50%;
+        display: inline-block;
+    }
+
+    .zdc-page-header {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 20px 0 18px;
+        border-bottom: 1px solid #1c1e2a;
+        margin-bottom: 20px;
+    }
+    .zdc-page-icon {
+        width: 38px; height: 38px;
+        background: #13141d;
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        display: flex; align-items: center; justify-content: center;
+        color: #5c7cfa;
+        font-size: 1rem;
+        font-weight: 600;
+        flex-shrink: 0;
+    }
+    .zdc-page-title {
+        font-size: 1.05rem !important;
+        font-weight: 600 !important;
+        color: var(--text-primary) !important;
+        margin: 0 !important;
+        letter-spacing: -0.01em;
+    }
+    .zdc-rag-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        background: rgba(59,91,219,0.08);
+        border: 1px solid rgba(59,91,219,0.2);
+        color: var(--text-primary);
+        font-size: 0.68rem;
+        font-weight: 500;
+        padding: 2px 9px;
+        border-radius: 100px;
+        margin-left: 10px;
+        vertical-align: middle;
+    }
+
+    .zdc-empty {
+        text-align: center;
+        padding: 60px 20px;
+    }
+    .zdc-empty-icon {
+        width: 44px; height: 44px;
+        background: #13141d;
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        display: flex; align-items: center; justify-content: center;
+        margin: 0 auto 14px;
+        color: var(--text-muted);
+        font-size: 1.1rem;
+        font-weight: 600;
+    }
+    .zdc-empty-title { font-size: 0.9rem; font-weight: 500; color: var(--text-primary); margin-bottom: 4px; }
+    .zdc-empty-sub   { font-size: 0.78rem; color: var(--text-secondary); }
+
+    /* Result rows */
+    .zdc-result-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 10px 14px;
+        margin-bottom: 6px;
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+    }
+    .zdc-result-row.success { border-left: 3px solid #4ade80; }
+    .zdc-result-row.skipped { border-left: 3px solid #6b7280; }
+    .zdc-result-row.failed  { border-left: 3px solid #f87171; color: #f87171; }
+    .zdc-result-source { font-weight: 500; color: var(--text-primary); }
+    .zdc-result-note   { color: var(--text-muted); font-size: 0.75rem; margin-top: 2px; }
+
+    /* Stat cards */
+    .zdc-stat-row { display: flex; gap: 12px; margin: 16px 0; }
+    .zdc-stat-card {
+        flex: 1;
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        padding: 14px 16px;
+        text-align: center;
+    }
+    .zdc-stat-num   { font-size: 1.8rem; font-weight: 600; line-height: 1; }
+    .zdc-stat-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); margin-top: 4px; }
+    .zdc-stat-card.green .zdc-stat-num { color: #4ade80; }
+    .zdc-stat-card.gray  .zdc-stat-num { color: #6b7280; }
+    .zdc-stat-card.red   .zdc-stat-num { color: #f87171; }
+
+    /* Format badges */
+    .zdc-badge {
+        display: inline-block;
+        font-size: 10px;
+        font-weight: 500;
+        padding: 2px 7px;
+        border-radius: 4px;
+        background: #13141d;
+        border: 1px solid var(--border-color);
+        color: var(--text-secondary);
+        margin: 2px;
+    }
+    .zdc-badge.warn { border-color: rgba(251,191,36,0.25); color: #fbbf24; }
+
+    .zdc-format-group { margin-bottom: 10px; }
+    .zdc-format-group-title {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--text-muted);
+        margin-bottom: 5px;
+        font-weight: 600;
+    }
+
+    /* Quality box */
+    .zdc-quality-box {
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 14px 16px;
+        margin: 12px 0;
+    }
+    .zdc-quality-label {
+        font-size: 0.75rem;
+        font-weight: 500;
+        color: var(--text-secondary);
+        margin-bottom: 8px;
+    }
+    </style>
     """, unsafe_allow_html=True)
 
-# ── Step 1: Upload ────────────────────────────────────────────────────────────
-st.markdown('<hr class="section-sep"><div class="section-label">01 — Upload Files</div>', unsafe_allow_html=True)
-uploaded_files = st.file_uploader("Drop files here", accept_multiple_files=True, label_visibility="collapsed")
-if uploaded_files:
-    names = ", ".join(f.name for f in uploaded_files[:5])
-    st.caption(f"📎 {len(uploaded_files)} file(s) — {names}" + ("…" if len(uploaded_files) > 5 else ""))
 
-# ── Step 2: Format ────────────────────────────────────────────────────────────
-st.markdown('<hr class="section-sep"><div class="section-label">02 — Target Format</div>', unsafe_allow_html=True)
+# ============================================================
+# STREAMLIT UI — ZEUS DOC CHAT STYLE
+# ============================================================
+
+inject_global_css()
 
 FORMAT_MAP = {
     "🖼️ Image":    ["webp", "png", "jpg", "jpeg", "bmp", "gif", "tiff"],
@@ -857,27 +895,127 @@ FORMAT_MAP = {
 QUALITY_FORMATS = {"jpg", "jpeg", "webp", "mp3", "ogg", "aac"}
 IS_BITRATE      = {"mp3", "ogg", "aac"}
 
-col1, col2 = st.columns([1, 2])
-with col1:
-    file_type_label = st.selectbox("File Type", list(FORMAT_MAP.keys()), label_visibility="collapsed")
-with col2:
-    target_format = st.selectbox("Target Format", FORMAT_MAP[file_type_label], label_visibility="collapsed")
+# ── SIDEBAR ────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown('<div class="zdc-section-label">Files</div>', unsafe_allow_html=True)
+
+    uploaded_files = st.file_uploader(
+        "Upload your files",
+        accept_multiple_files=True,
+        label_visibility="collapsed"
+    )
+
+    if uploaded_files:
+        st.markdown(
+            f'<div class="zdc-status-ok">{len(uploaded_files)} file(s) ready</div>',
+            unsafe_allow_html=True
+        )
+
+    st.markdown('<div class="zdc-section-label">Target Format</div>', unsafe_allow_html=True)
+
+    file_type_label = st.selectbox(
+        "File Type",
+        list(FORMAT_MAP.keys()),
+        label_visibility="collapsed"
+    )
+    target_format = st.selectbox(
+        "Format",
+        FORMAT_MAP[file_type_label],
+        label_visibility="collapsed"
+    )
+
+    quality = None
+    if target_format in QUALITY_FORMATS:
+        st.markdown('<div class="zdc-section-label">Quality</div>', unsafe_allow_html=True)
+        if target_format in IS_BITRATE:
+            quality = st.slider("Bitrate (kbps)", 64, 320,
+                                int(DEFAULT_QUALITY.get(target_format, 192)), step=32)
+            st.caption(f"Audio bitrate: **{quality} kbps**")
+        else:
+            quality = st.slider("Image Quality", 1, 100,
+                                int(DEFAULT_QUALITY.get(target_format, 85)))
+            st.caption(f"Quality: **{quality}/100**")
+
+    st.markdown('<div class="zdc-section-label">Actions</div>', unsafe_allow_html=True)
+    convert_btn = st.button("Convert All Files", use_container_width=True, type="primary")
 
 
-quality = None
-if target_format in QUALITY_FORMATS:
-    st.markdown('<hr class="section-sep">', unsafe_allow_html=True)
-    if target_format in IS_BITRATE:
-        quality = st.slider("Bitrate (kbps)", 64, 320, int(DEFAULT_QUALITY.get(target_format, 192)), step=32)
-        st.caption(f"Audio bitrate: **{quality} kbps** — higher = better quality, larger file")
-    else:
-        quality = st.slider("Image Quality", 1, 100, int(DEFAULT_QUALITY.get(target_format, 85)))
-        st.caption(f"Quality: **{quality}/100** — higher = sharper image, larger file")
+# ── MAIN AREA ──────────────────────────────────────────────────────────────────
 
-# ── Step 3: Convert ───────────────────────────────────────────────────────────
-st.markdown('<hr class="section-sep"><div class="section-label">03 — Convert</div>', unsafe_allow_html=True)
+st.markdown("""
+<div class="zdc-page-header">
+  <div class="zdc-page-icon">⚡</div>
+  <div>
+    <div class="zdc-page-title">Bulk Format Converter
+      <span class="zdc-rag-badge">Images · Audio · Docs</span>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-if st.button("⚡ Convert All Files"):
+# Supported formats reference
+with st.expander("Supported Input Formats"):
+    st.markdown("""
+    <div class="zdc-format-group">
+      <div class="zdc-format-group-title">🖼️ Images</div>
+      <span class="zdc-badge">.png</span><span class="zdc-badge">.jpg</span>
+      <span class="zdc-badge">.jpeg</span><span class="zdc-badge">.bmp</span>
+      <span class="zdc-badge">.gif</span><span class="zdc-badge">.tiff</span>
+      <span class="zdc-badge">.webp</span><span class="zdc-badge">.ico</span>
+      <span class="zdc-badge">.ppm</span>
+    </div>
+    <div class="zdc-format-group">
+      <div class="zdc-format-group-title">🎵 Audio</div>
+      <span class="zdc-badge">.mp3</span><span class="zdc-badge">.wav</span>
+      <span class="zdc-badge">.ogg</span><span class="zdc-badge">.flac</span>
+      <span class="zdc-badge">.aac</span><span class="zdc-badge">.wma</span>
+      <span class="zdc-badge">.m4a</span>
+    </div>
+    <div class="zdc-format-group">
+      <div class="zdc-format-group-title">📄 Documents — Word</div>
+      <span class="zdc-badge">.docx</span>
+      <span class="zdc-badge warn">.doc ⚠ LibreOffice</span>
+      <span class="zdc-badge">.dotx</span><span class="zdc-badge">.dotm</span>
+      <span class="zdc-badge">.docm</span>
+    </div>
+    <div class="zdc-format-group">
+      <div class="zdc-format-group-title">📄 Documents — Other</div>
+      <span class="zdc-badge">.pdf</span><span class="zdc-badge">.rtf</span>
+      <span class="zdc-badge">.odt</span><span class="zdc-badge">.txt</span>
+      <span class="zdc-badge">.md</span><span class="zdc-badge">.html</span>
+      <span class="zdc-badge">.htm</span><span class="zdc-badge">.csv</span>
+      <span class="zdc-badge">.xlsx</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+# Empty state
+if not uploaded_files:
+    st.markdown("""
+    <div class="zdc-empty">
+      <div class="zdc-empty-icon">[ ]</div>
+      <div class="zdc-empty-title">No files uploaded</div>
+      <div class="zdc-empty-sub">Upload files and choose a target format using the sidebar, then hit Convert</div>
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    # File list preview
+    st.markdown('<div class="zdc-section-label">Uploaded Files</div>', unsafe_allow_html=True)
+    names_preview = [f.name for f in uploaded_files[:6]]
+    extra = len(uploaded_files) - 6
+    for name in names_preview:
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else "?"
+        st.markdown(
+            f'<div class="zdc-result-row">'
+            f'<span class="zdc-badge">.{ext}</span>'
+            f'<span class="zdc-result-source">{name}</span>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+    if extra > 0:
+        st.caption(f"…and {extra} more file(s)")
+
+# ── CONVERSION ─────────────────────────────────────────────────────────────────
+if convert_btn:
     if not uploaded_files:
         st.warning("Please upload at least one file first.")
         st.stop()
@@ -923,7 +1061,6 @@ if st.button("⚡ Convert All Files"):
                     convert_audio(in_path, out_path, quality)
                 elif file_type == "doc":
                     convert_doc(in_path, out_path)
-
                 converted_files[out_path.name] = out_path.read_bytes()
                 results.append(ConversionResult(uf.name, out_path.name, "success"))
             except Exception as e:
@@ -931,25 +1068,46 @@ if st.button("⚡ Convert All Files"):
 
         progress.progress(1.0, text="Done!")
 
-    # ── Summary cards ─────────────────────────────────────────────────────────
+    # ── Summary stats ──────────────────────────────────────────────────────────
     success = sum(1 for r in results if r.status == "success")
     skipped = sum(1 for r in results if r.status == "skipped")
     failed  = sum(1 for r in results if r.status == "failed")
 
-    c1, c2, c3 = st.columns(3)
-    with c1: st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#7fff6a">{success}</div><div class="stat-label">Converted</div></div>', unsafe_allow_html=True)
-    with c2: st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#555570">{skipped}</div><div class="stat-label">Skipped</div></div>', unsafe_allow_html=True)
-    with c3: st.markdown(f'<div class="stat-card"><div class="stat-number" style="color:#ff6aad">{failed}</div><div class="stat-label">Failed</div></div>', unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="zdc-stat-row">
+      <div class="zdc-stat-card green">
+        <div class="zdc-stat-num">{success}</div>
+        <div class="zdc-stat-label">Converted</div>
+      </div>
+      <div class="zdc-stat-card gray">
+        <div class="zdc-stat-num">{skipped}</div>
+        <div class="zdc-stat-label">Skipped</div>
+      </div>
+      <div class="zdc-stat-card red">
+        <div class="zdc-stat-num">{failed}</div>
+        <div class="zdc-stat-label">Failed</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # ── Per-file results ───────────────────────────────────────────────────────
-    st.markdown("<br><div class='section-label'>Results</div>", unsafe_allow_html=True)
+    st.markdown('<div class="zdc-section-label">Results</div>', unsafe_allow_html=True)
     for r in results:
         icon = {"success": "✅", "skipped": "⏭️", "failed": "❌"}.get(r.status, "•")
-        css  = {"success": "result-success", "skipped": "result-skipped", "failed": "result-failed"}.get(r.status, "")
-        note = f" — {r.error}" if r.error else (f" → {r.target}" if r.target else "")
-        st.markdown(f'<div class="{css}">{icon} {r.source}{note}</div>', unsafe_allow_html=True)
+        css  = r.status
+        note = r.error if r.error else (f"→ {r.target}" if r.target else "")
+        st.markdown(
+            f'<div class="zdc-result-row {css}">'
+            f'<span style="font-size:0.9rem">{icon}</span>'
+            f'<div>'
+            f'<div class="zdc-result-source">{r.source}</div>'
+            f'<div class="zdc-result-note">{note}</div>'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
 
-    # ── Download ZIP ───────────────────────────────────────────────────────────
+    # ── Downloads ──────────────────────────────────────────────────────────────
     if converted_files:
         st.markdown("<br>", unsafe_allow_html=True)
         zip_buf = io.BytesIO()
@@ -963,9 +1121,9 @@ if st.button("⚡ Convert All Files"):
             data=zip_buf,
             file_name=f"converted_{ts}.zip",
             mime="application/zip",
+            use_container_width=True,
         )
 
-    # ── Download log ───────────────────────────────────────────────────────────
     if results:
         ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
         log = [f"Conversion Log — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n" + "=" * 60]
