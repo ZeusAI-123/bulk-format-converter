@@ -944,7 +944,7 @@ with st.sidebar:
 
 st.markdown("""
 <div class="zdc-page-header">
-  <div class="zdc-page-icon">⚡</div>
+  
   <div>
     <div class="zdc-page-title">ZEUS Bulk Format Converter
       <span class="zdc-rag-badge">Images · Audio · Docs</span>
